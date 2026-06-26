@@ -7,7 +7,7 @@ import {
   searchRequestsTotal,
   searchDuration,
 } from "./middlewares/metrics";
-import { trace } from "@opentelemetry/api";
+import { trace, SpanStatusCode } from "@opentelemetry/api";
 
 dotenv.config();
 
@@ -50,67 +50,72 @@ const SEARCH_REPOSITORIES_QUERY = `
 `;
 
 async function searchGitHubRepos(keyword: string) {
-  try {
-    console.log(`🔍 Buscando "${keyword}" en GitHub...`);
+  return tracer.startActiveSpan("github.graphql.search", async (span) => {
+    try {
+      span.setAttribute("github.search.keyword", keyword);
 
-    if (!GITHUB_TOKEN) {
-      throw new Error("GITHUB_TOKEN no está definido");
-    }
+      if (!GITHUB_TOKEN) {
+        throw new Error("GITHUB_TOKEN no está definido");
+      }
 
-    const start = Date.now();
+      span.addEvent("http.request.start");
 
-    const response = await axios.post(
-      GITHUB_GRAPHQL_URL,
-      {
-        query: SEARCH_REPOSITORIES_QUERY,
-        variables: {
-          query: keyword,
-          first: 10,
+      const response = await axios.post(
+        GITHUB_GRAPHQL_URL,
+        {
+          query: SEARCH_REPOSITORIES_QUERY,
+          variables: {
+            query: keyword,
+            first: 10,
+          },
         },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${GITHUB_TOKEN}`,
-          "Content-Type": "application/json",
+        {
+          headers: {
+            Authorization: `Bearer ${GITHUB_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+          timeout: 10000,
         },
-        timeout: 10000,
-      },
-    );
+      );
 
-    const duration = (Date.now() - start) / 1000;
-    searchDuration.record(duration, { keyword });
+      span.addEvent("http.request.end");
 
-    if (response.data.errors) {
-      console.error("❌ GraphQL Error:", response.data.errors);
+      if (response.data.errors) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: "GraphQL errors" });
+        span.setAttribute("github.search.error", JSON.stringify(response.data.errors));
+        searchRequestsTotal.add(1, { keyword, status: "error" });
+        return null;
+      }
+
+      const data = response.data.data.search;
+      span.setAttribute("github.search.repo_count", data.repositoryCount);
+      span.setStatus({ code: SpanStatusCode.OK });
+      searchRequestsTotal.add(1, { keyword, status: "success" });
+      return data;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      span.setStatus({ code: SpanStatusCode.ERROR, message });
+      span.recordException(error instanceof Error ? error : new Error(message));
       searchRequestsTotal.add(1, { keyword, status: "error" });
       return null;
+    } finally {
+      span.end();
     }
-
-    const data = response.data.data.search;
-    console.log(`✅ Se encontraron ${data.repositoryCount} repos`);
-    searchRequestsTotal.add(1, { keyword, status: "success" });
-    return data;
-  } catch (error) {
-    if (axios.isAxiosError(error)) {
-      console.error("❌ Error Status:", error.response?.status);
-      console.error("❌ Error Message:", error.message);
-    } else {
-      const message = error instanceof Error ? error.message : "Unknown error";
-      console.error("❌ Error:", message);
-    }
-    searchRequestsTotal.add(1, { keyword, status: "error" });
-    return null;
-  }
+  });
 }
 
 app.get(
   "/search/:keyword",
   async (req: Request, res: Response): Promise<void> => {
-    return tracer.startActiveSpan("", async (span) => {
+    return tracer.startActiveSpan("HTTP GET /search/:keyword", async (span) => {
       try {
         const keyword = req.params.keyword;
+        span.setAttribute("http.method", "GET");
+        span.setAttribute("http.route", "/search/:keyword");
+        span.setAttribute("search.keyword", keyword);
 
         if (typeof keyword !== "string" || !keyword) {
+          span.setAttribute("http.status_code", 400);
           res.status(400).json({ error: "Valid keyword is required" });
           return;
         }
@@ -118,10 +123,14 @@ app.get(
         const results = await searchGitHubRepos(keyword);
 
         if (!results) {
+          span.setAttribute("http.status_code", 500);
           res.status(500).json({ error: "Failed to search GitHub" });
           return;
         }
-        span.end();
+
+        span.setAttribute("http.status_code", 200);
+        span.setAttribute("search.result_count", results.repositoryCount);
+        span.setStatus({ code: SpanStatusCode.OK });
         res.status(200).json({
           keyword,
           totalCount: results.repositoryCount,
@@ -139,11 +148,13 @@ app.get(
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Unknown error";
+        span.setStatus({ code: SpanStatusCode.ERROR, message });
         span.recordException(
           error instanceof Error ? error : new Error(message),
         );
-        span.end();
         res.status(500).json({ error: message });
+      } finally {
+        span.end();
       }
     });
   },
