@@ -4,6 +4,7 @@ import express, { Express, NextFunction, Request, Response } from "express";
 import { metricsMiddleware } from "./middlewares/metrics";
 import searchRouter from "./routes/search";
 import healthRouter from "./routes/health";
+import { createClient } from 'redis';
 
 dotenv.config();
 
@@ -12,6 +13,13 @@ const PORT = process.env.PORT || 3000;
 
 console.log("🔐 Token cargado:", process.env.GITHUB_TOKEN ? "✅ SÍ" : "❌ NO");
 console.log("🚀 Puerto:", PORT);
+
+const redisClient = createClient({
+   url: process.env.REDIS_URL || "redis://redis:6379"
+});
+redisClient.on('error', err => console.error('Redis err:', err));
+
+redisClient.connect().then(e => console.log("Redis Conected")).catch(err => { console.error('Redis err:', err); process.exit(1); });
 
 app.use(metricsMiddleware);
 app.use("/search", searchRouter);
@@ -31,4 +39,4 @@ const server = app.listen(PORT, () => {
   console.log("Jaeger URL http://localhost:16686/search");
 });
 
-export { app };
+export { app, redisClient };
