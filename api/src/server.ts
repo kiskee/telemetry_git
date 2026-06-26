@@ -1,3 +1,4 @@
+import "./otel/config";
 import dotenv from "dotenv";
 import express, { Express, Request, Response, NextFunction } from "express";
 import axios from "axios";
@@ -194,6 +195,7 @@ const server = app.listen(PORT, () => {
   console.log(`❤️ Health: http://localhost:${PORT}/health`);
   console.log("Prometheus URL: http://localhost:9090")
   console.log("Grafana URL:  http://localhost:3001")
+  console.log("Jeager URL http://localhost:16686/search")
 });
 
 export { app };
