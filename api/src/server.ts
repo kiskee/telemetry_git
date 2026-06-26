@@ -2,12 +2,19 @@ import "./otel/config";
 import dotenv from "dotenv";
 import express, { Express, Request, Response, NextFunction } from "express";
 import axios from "axios";
-import client from "prom-client";
+import {
+  metricsMiddleware,
+  searchRequestsTotal,
+  searchDuration,
+} from "./middlewares/metrics";
+import { trace } from "@opentelemetry/api";
 
 dotenv.config();
 
 const app: Express = express();
 const PORT = process.env.PORT || 3000;
+
+const tracer = trace.getTracer("github-analytics-api");
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
@@ -15,39 +22,7 @@ const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
 console.log("🔐 Token cargado:", GITHUB_TOKEN ? "✅ SÍ" : "❌ NO");
 console.log("🚀 Puerto:", PORT);
 
-// ===== PROMETHEUS METRICS =====
-const httpRequestDuration = new client.Histogram({
-  name: "http_request_duration_seconds",
-  help: "Duration of HTTP requests in seconds",
-  labelNames: ["method", "route", "status_code"],
-  buckets: [0.1, 0.5, 1, 2, 5],
-});
-
-const searchRequests = new client.Counter({
-  name: "github_search_requests_total",
-  help: "Total GitHub search requests",
-  labelNames: ["keyword", "status"],
-});
-
-const searchDuration = new client.Histogram({
-  name: "github_search_duration_seconds",
-  help: "Duration of GitHub searches",
-  labelNames: ["keyword"],
-});
-
-// Middleware para métricas
-app.use((req: Request, res: Response, next: NextFunction) => {
-  const start = Date.now();
-
-  res.on("finish", () => {
-    const duration = (Date.now() - start) / 1000;
-    httpRequestDuration
-      .labels(req.method, req.path, res.statusCode.toString())
-      .observe(duration);
-  });
-
-  next();
-});
+app.use(metricsMiddleware);
 
 const SEARCH_REPOSITORIES_QUERY = `
   query SearchRepositories($query: String!, $first: Int!) {
@@ -99,23 +74,21 @@ async function searchGitHubRepos(keyword: string) {
           "Content-Type": "application/json",
         },
         timeout: 10000,
-      }
+      },
     );
 
     const duration = (Date.now() - start) / 1000;
-    searchDuration.labels(keyword).observe(duration);
+    searchDuration.record(duration, { keyword });
 
     if (response.data.errors) {
       console.error("❌ GraphQL Error:", response.data.errors);
-      searchRequests.labels(keyword, "error").inc();
+      searchRequestsTotal.add(1, { keyword, status: "error" });
       return null;
     }
 
     const data = response.data.data.search;
     console.log(`✅ Se encontraron ${data.repositoryCount} repos`);
-
-    searchRequests.labels(keyword, "success").inc();
-
+    searchRequestsTotal.add(1, { keyword, status: "success" });
     return data;
   } catch (error) {
     if (axios.isAxiosError(error)) {
@@ -125,77 +98,74 @@ async function searchGitHubRepos(keyword: string) {
       const message = error instanceof Error ? error.message : "Unknown error";
       console.error("❌ Error:", message);
     }
-    searchRequests.labels(keyword, "error").inc();
+    searchRequestsTotal.add(1, { keyword, status: "error" });
     return null;
   }
 }
 
-app.get("/search/:keyword", async (req: Request, res: Response): Promise<void> => {
-  try {
-    const keyword = req.params.keyword;
+app.get(
+  "/search/:keyword",
+  async (req: Request, res: Response): Promise<void> => {
+    return tracer.startActiveSpan("", async (span) => {
+      try {
+        const keyword = req.params.keyword;
 
-    if (typeof keyword !== "string" || !keyword) {
-      res.status(400).json({ error: "Valid keyword is required" });
-      return;
-    }
+        if (typeof keyword !== "string" || !keyword) {
+          res.status(400).json({ error: "Valid keyword is required" });
+          return;
+        }
 
-    const results = await searchGitHubRepos(keyword);
+        const results = await searchGitHubRepos(keyword);
 
-    if (!results) {
-      res.status(500).json({ error: "Failed to search GitHub" });
-      return;
-    }
-
-    res.status(200).json({
-      keyword,
-      totalCount: results.repositoryCount,
-      repositories: results.edges.map((edge: any) => ({
-        name: edge.node.name,
-        url: edge.node.url,
-        stars: edge.node.stargazerCount,
-        forks: edge.node.forkCount,
-        language: edge.node.primaryLanguage?.name || "Unknown",
-        description: edge.node.description,
-        createdAt: edge.node.createdAt,
-        lastPush: edge.node.pushedAt,
-      })),
+        if (!results) {
+          res.status(500).json({ error: "Failed to search GitHub" });
+          return;
+        }
+        span.end();
+        res.status(200).json({
+          keyword,
+          totalCount: results.repositoryCount,
+          repositories: results.edges.map((edge: any) => ({
+            name: edge.node.name,
+            url: edge.node.url,
+            stars: edge.node.stargazerCount,
+            forks: edge.node.forkCount,
+            language: edge.node.primaryLanguage?.name || "Unknown",
+            description: edge.node.description,
+            createdAt: edge.node.createdAt,
+            lastPush: edge.node.pushedAt,
+          })),
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unknown error";
+        span.recordException(
+          error instanceof Error ? error : new Error(message),
+        );
+        span.end();
+        res.status(500).json({ error: message });
+      }
     });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    res.status(500).json({ error: message });
-  }
-});
+  },
+);
 
 app.get("/health", (_req: Request, res: Response): void => {
   res.status(200).json({ status: "OK", timestamp: new Date() });
 });
 
-app.get("/metrics", async (_req: Request, res: Response): Promise<void> => {
-  try {
-    res.set("Content-Type", client.register.contentType);
-    const metrics = await client.register.metrics();
-    res.status(200).end(metrics);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    res.status(500).json({ error: message });
-  }
-});
-
 // Error handling
-app.use(
-  (err: Error, req: Request, res: Response, next: NextFunction): void => {
-    console.error("❌ Unhandled error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-);
+app.use((err: Error, req: Request, res: Response, next: NextFunction): void => {
+  console.error("❌ Unhandled error:", err);
+  res.status(500).json({ error: "Internal server error" });
+});
 
 const server = app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📊 Metrics: http://localhost:${PORT}/metrics`);
   console.log(`❤️ Health: http://localhost:${PORT}/health`);
-  console.log("Prometheus URL: http://localhost:9090")
-  console.log("Grafana URL:  http://localhost:3001")
-  console.log("Jeager URL http://localhost:16686/search")
+  console.log("Prometheus URL: http://localhost:9090");
+  console.log("Grafana URL:  http://localhost:3001");
+  console.log("Jeager URL http://localhost:16686/search");
 });
 
 export { app };

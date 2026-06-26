@@ -21,7 +21,7 @@ const sdk = new NodeSDK({
     //host: "0.0.0.0",
   }),
   instrumentations: [
-    getNodeAutoInstrumentations(),
+    //getNodeAutoInstrumentations(),
     //new HttpInstrumentation(),
     //new ExpressInstrumentation(),
   ],
