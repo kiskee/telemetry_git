@@ -76,6 +76,21 @@ services:
     networks:
       - github-network
 
+  # Jaeger (Traces)
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: github-analytics-jaeger
+    ports:
+      - "16686:16686"   # UI
+      - "6831:6831/udp" # Agent
+      - "14268:14268"   # Collector HTTP
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    networks:
+      - github-network
+
   # API Node.js
   api:
     build: ./api
@@ -88,6 +103,8 @@ services:
       REDIS_URL: ${REDIS_URL}
       PORT: 3000
       NODE_ENV: ${NODE_ENV}
+      JAEGER_AGENT_HOST: jaeger
+      JAEGER_COLLECTOR_URL: http://jaeger:14268
     depends_on:
       postgres:
         condition: service_healthy
