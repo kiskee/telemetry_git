@@ -1,9 +1,3 @@
--- Crear base de datos si no existe
-CREATE DATABASE github_analytics;
-
--- Conectar a la BD
-\c github_analytics;
-
 -- Crear tabla de búsquedas
 CREATE TABLE IF NOT EXISTS searches (
   id SERIAL PRIMARY KEY,
