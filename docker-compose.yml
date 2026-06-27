@@ -67,6 +67,7 @@ services:
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: "redis-datasource"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
@@ -146,6 +147,20 @@ services:
       - github-network
     command: npm start
     restart: unless-stopped
+
+  # Redis Exporter
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    container_name: github-analytics-redis-exporter
+    ports:
+      - "9121:9121"
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    networks:
+      - github-network
+    depends_on:
+      redis:
+        condition: service_healthy
 
 volumes:
   postgres_data:

@@ -1,6 +1,7 @@
 import axios from "axios";
 import { trace, SpanStatusCode } from "@opentelemetry/api";
 import { searchRequestsTotal } from "../middlewares/metrics";
+import { redisClient } from "../server";
 
 const tracer = trace.getTracer("github-analytics-api");
 
@@ -54,6 +55,16 @@ export async function searchGitHubRepos(keyword: string): Promise<SearchResult |
     try {
       span.setAttribute("github.search.keyword", keyword);
 
+      //CACHEEEE
+      const cacheKey = `search:${keyword}`;
+      const cached = await redisClient.get(cacheKey);
+
+      if (cached) {
+        span.setAttribute("cache.hit", true);
+        span.end();
+        
+        return JSON.parse(cached);
+      }
       if (!GITHUB_TOKEN) {
         throw new Error("GITHUB_TOKEN no está definido");
       }
@@ -85,7 +96,7 @@ export async function searchGitHubRepos(keyword: string): Promise<SearchResult |
       span.setStatus({ code: SpanStatusCode.OK });
       searchRequestsTotal.add(1, { keyword, status: "success" });
 
-      return {
+      const responseFinal = {
         keyword,
         totalCount: data.repositoryCount,
         repositories: data.edges.map((edge: any) => ({
@@ -99,6 +110,9 @@ export async function searchGitHubRepos(keyword: string): Promise<SearchResult |
           lastPush: edge.node.pushedAt,
         })),
       };
+
+      await redisClient.setEx(cacheKey, 60, JSON.stringify(responseFinal));
+      return responseFinal
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       span.setStatus({ code: SpanStatusCode.ERROR, message });
