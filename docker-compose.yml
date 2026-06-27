@@ -91,6 +91,35 @@ services:
     networks:
       - github-network
 
+  # Loki (Logs)
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: github-analytics-loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki-config.yml:/etc/loki/local-config.yaml
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - github-network
+
+  # Promtail (Log shipper → Loki)
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: github-analytics-promtail
+    user: root
+    volumes:
+      - ./promtail-config.yml:/etc/promtail/config.yml
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - promtail_positions:/tmp
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - github-network
+    depends_on:
+      - loki
+
   # API Node.js
   api:
     build: ./api
@@ -123,6 +152,8 @@ volumes:
   redis_data:
   prometheus_data:
   grafana_data:
+  loki_data:
+  promtail_positions:
 
 networks:
   github-network:
